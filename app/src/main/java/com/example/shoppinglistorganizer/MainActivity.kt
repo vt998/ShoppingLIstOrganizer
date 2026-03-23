@@ -17,23 +17,44 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
-import android.R.attr.checked
-import android.icu.text.ListFormatter
+import android.app.Application
+import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Alignment
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.MutableState
+import androidx.room.PrimaryKey
+import androidx.room.Dao
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.room.Database
+import androidx.room.Delete
+import androidx.room.Entity
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
+import androidx.room.Query
+import androidx.room.Room
+import androidx.room.RoomDatabase
+import androidx.room.Update
 import com.example.shoppinglistorganizer.ui.theme.ShoppingLIstOrganizerTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,106 +64,187 @@ class MainActivity : ComponentActivity() {
             ShoppingLIstOrganizerTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     Surface(modifier = Modifier.padding(innerPadding)) {
-                        Text("Hello,Android")
-
+                        ShoppingListScreen()
+                    }
                 }
             }
         }
     }
 }
 
+@Entity(tableName = "shopping_items")
 data class ShoppingItem(
     val name: String,
-    val isBought: Boolean = false
+    val isBought: Boolean = false,
+    @PrimaryKey(autoGenerate = true) val id: Int = 0
 )
 
+@Dao
+interface ShoppingItemDao {
+    @Query("SELECT * FROM shopping_items ORDER BY id DESC")
+    fun getAllItems(): Flow<List<ShoppingItem>>
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertItem(item: ShoppingItem)
 
-    class ShoppingListViewModel : ViewModel() {
-        val shoppingList = mutableStateListOf(
-            ShoppingItem("молоко"),
-            ShoppingItem("хліб"),
-            ShoppingItem("масло"),
-            ShoppingItem("олія"),
-        )
+    @Update
+    suspend fun updateItem(item: ShoppingItem)
 
-        fun toggleBought(index: Int) {
-            shoppingList[index] = shoppingList[index].copy(
-                isBought = !shoppingList[index].isBought
-            )
+    @Delete
+    suspend fun deleteItem(item: ShoppingItem)
+}
+
+@Database(entities = [ShoppingItem::class], version = 1)
+abstract class ShoppingDatabase : RoomDatabase() {
+    abstract fun shoppingDao(): ShoppingItemDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: ShoppingDatabase? = null
+
+        fun getInstance(context: Context): ShoppingDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    ShoppingDatabase::class.java,
+                    "shopping_db"
+                ).build()
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+}
+
+class ShoppingListViewModel(application: Application) : AndroidViewModel(application) {
+    private val dao: ShoppingItemDao = ShoppingDatabase.getInstance(application).shoppingDao()
+    private val _shoppingList = mutableStateListOf<ShoppingItem>()
+    val shoppingList: List<ShoppingItem> get() = _shoppingList
+
+    init {
+        loadShoppingList()
+    }
+
+    private fun loadShoppingList() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val items = dao.getAllItems().first()
+            _shoppingList.clear()
+            _shoppingList.addAll(items)
         }
     }
 
+    fun addItem(name: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.insertItem(ShoppingItem(name = name))
+            loadShoppingList()
+        }
+    }
+
+    fun toggleBought(index: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val item = _shoppingList[index]
+            val updatedItem = item.copy(isBought = !item.isBought)
+            dao.updateItem(updatedItem)
+            _shoppingList[index] = updatedItem
+        }
+    }
+}
 
 @Composable
 fun ShoppingItemCard(
     item: ShoppingItem,
-    onToggleBought : () -> Unit = {}
-){
-
-
+    onToggleBought: () -> Unit = {}
+) {
     Row(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
             .padding(8.dp)
-            .background(MaterialTheme.colorScheme.surfaceDim,
+            .background(
+                MaterialTheme.colorScheme.surfaceVariant,
                 MaterialTheme.shapes.medium
             )
-            .clickable{onToggleBought() }
+            .clickable { onToggleBought() }
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Checkbox(checked = item.isBought, onCheckedChange = {
-            onToggleBought()
-        })
+        Checkbox(checked = item.isBought, onCheckedChange = { onToggleBought() })
         Text(
             text = item.name,
             modifier = Modifier.weight(1f),
             fontSize = 18.sp
         )
+    }
+}
 
+class ShoppingListViewModelFactory(private val application: Application) :
+    ViewModelProvider.Factory {
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        if (modelClass.isAssignableFrom(ShoppingListViewModel::class.java)) {
+            @Suppress("UNCHECKED_CAST")
+            return ShoppingListViewModel(application) as T
+        }
+        throw IllegalArgumentException("Unknown ViewModel class")
     }
 }
 
 @Composable
-fun ShoppingListScreen(viewModel: ShoppingListViewModel= viewModel()) {
+fun AddItemButton(addItem: (String) -> Unit = {}) {
+    var text by remember { mutableStateOf("") }
 
+    Column {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            label = { Text("Add Item") }
+        )
+        Button(onClick = {
+            if (text.isNotEmpty()) {
+                addItem(text)
+                text = ""
+            }
+        }) {
+            Text("Add")
+        }
+    }
+}
+
+@Composable
+fun ShoppingListScreen(
+    viewModel: ShoppingListViewModel = viewModel(
+        factory = ShoppingListViewModelFactory(
+            LocalContext.current.applicationContext as Application
+        )
+    )
+) {
     LazyColumn(
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
             .padding(16.dp)
     ) {
+        item {
+            AddItemButton { viewModel.addItem(it) }
+        }
         itemsIndexed(viewModel.shoppingList) { ix, item ->
-            ShoppingItemCard(item){
+            ShoppingItemCard(item) {
                 viewModel.toggleBought(ix)
             }
-
+        }
     }
 }
+
+@Preview
+@Composable
+fun ShoppingListScreenPreview() {
+    ShoppingListScreen()
 }
-
-
-
-    @Preview
-    @Composable
-    fun ShoppingListScreenPreview() {
-            ShoppingListScreen()
-
-    }
-
-
 
 @Preview(showBackground = true)
 @Composable
 fun ShoppingItemCardPreview() {
-        var toggleState by remember { mutableStateOf(false) }
-        ShoppingItemCard(
-            item = ShoppingItem("Молоко", isBought = toggleState)
-        ) {
-            toggleState = !toggleState
-        }
-    }}
-
-
-
-
-
-
+    var toggleState by remember { mutableStateOf(false) }
+    ShoppingItemCard(
+        item = ShoppingItem("Молоко", isBought = toggleState)
+    ) {
+        toggleState = !toggleState
+    }
+}
